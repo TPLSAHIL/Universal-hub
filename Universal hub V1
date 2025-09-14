@@ -1,0 +1,573 @@
+-- Universal Hub (Redz-style) - ESP (infinite range + wallhack) + Noclip + Hitbox Expander + Toggle Icon
+-- Made by Sahil (pastebin-ready)
+-- Client-side only. Do not use to bypass protections.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+-- ===== CONFIG =====
+local MAX_DISTANCE = 9e18 -- effectively infinite
+local UPDATE_PLAYERLIST_INTERVAL = 0.6
+local PLAYER_BTN_HEIGHT = 28
+
+-- ===== STATE =====
+local ESPEnabled = true
+local ChamsEnabled = true -- highlights
+local NoclipEnabled = false
+local SelectedPlayer = nil
+local OriginalParts = {} -- store original props for restore (per player)
+local HighlightMap = {}  -- store Highlight instances per player
+local espMap = {}        -- store billboard data per player
+
+-- ===== UTIL =====
+local function safeParent(inst, parent)
+    pcall(function() inst.Parent = parent end)
+end
+
+local function makeDraggable(guiElement)
+    local dragging, dragInput, dragStart, startPos
+    guiElement.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = guiElement.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    guiElement.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
+        end
+    end)
+    RunService.RenderStepped:Connect(function()
+        if dragging and dragInput and dragStart and startPos then
+            local delta = dragInput.Position - dragStart
+            guiElement.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+local function getPrimaryRoot(model)
+    if not model then return nil end
+    local hrp = model:FindFirstChild("HumanoidRootPart")
+    if hrp then return hrp end
+    local head = model:FindFirstChild("Head")
+    if head then return head end
+    for _,v in ipairs(model:GetChildren()) do
+        if v:IsA("BasePart") then return v end
+    end
+    return nil
+end
+
+-- ===== GUI CREATION (Redz-style minimal) =====
+local screenParent = game:FindService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
+local mainGui = Instance.new("ScreenGui")
+mainGui.Name = "UniversalHub_Redz"
+safeParent(mainGui, screenParent)
+
+-- ICON (draggable)
+local Icon = Instance.new("Frame")
+Icon.Name = "HubIcon"
+Icon.Size = UDim2.new(0,44,0,44)
+Icon.Position = UDim2.new(0.02,0,0.25,0)
+Icon.BackgroundColor3 = Color3.fromRGB(24,24,24)
+Icon.BorderSizePixel = 0
+Icon.Parent = mainGui
+local IconUICorner = Instance.new("UICorner", Icon); IconUICorner.CornerRadius = UDim.new(0,8)
+
+local IconBtn = Instance.new("TextButton")
+IconBtn.Size = UDim2.new(1,0,1,0)
+IconBtn.BackgroundTransparency = 1
+IconBtn.Text = "UH"
+IconBtn.Font = Enum.Font.GothamBold
+IconBtn.TextSize = 18
+IconBtn.TextColor3 = Color3.fromRGB(255,255,255)
+IconBtn.Parent = Icon
+
+-- WINDOW
+local Window = Instance.new("Frame")
+Window.Name = "MainWindow"
+Window.Size = UDim2.new(0,340,0,420)
+Window.Position = UDim2.new(0.08,0,0.22,0)
+Window.BackgroundColor3 = Color3.fromRGB(14,14,14)
+Window.BorderSizePixel = 0
+Window.Parent = mainGui
+local WindowCorner = Instance.new("UICorner", Window); WindowCorner.CornerRadius = UDim.new(0,10)
+local header = Instance.new("Frame", Window)
+header.Name = "Header"
+header.Size = UDim2.new(1,0,0,44)
+header.Position = UDim2.new(0,0,0,0)
+header.BackgroundColor3 = Color3.fromRGB(20,20,20)
+local headerLabel = Instance.new("TextLabel", header)
+headerLabel.Size = UDim2.new(1,-80,1,0)
+headerLabel.Position = UDim2.new(0,12,0,0)
+headerLabel.BackgroundTransparency = 1
+headerLabel.Text = "Universal Hub"
+headerLabel.TextColor3 = Color3.fromRGB(230,230,230)
+headerLabel.Font = Enum.Font.GothamBold
+headerLabel.TextSize = 18
+headerLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local CloseBtn = Instance.new("TextButton", header)
+CloseBtn.Size = UDim2.new(0,64,0,30)
+CloseBtn.Position = UDim2.new(1,-74,0,7)
+CloseBtn.Text = "Close"
+CloseBtn.Font = Enum.Font.Gotham
+CloseBtn.TextSize = 14
+CloseBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+CloseBtn.TextColor3 = Color3.fromRGB(255,255,255)
+
+-- Buttons
+local ESPButton = Instance.new("TextButton", Window)
+ESPButton.Size = UDim2.new(0,150,0,34)
+ESPButton.Position = UDim2.new(0,12,0,62)
+ESPButton.Text = "ESP: ON"
+ESPButton.Font = Enum.Font.Gotham
+ESPButton.TextSize = 14
+ESPButton.BackgroundColor3 = Color3.fromRGB(30,30,30)
+ESPButton.TextColor3 = Color3.fromRGB(255,255,255)
+local NoclipButton = Instance.new("TextButton", Window)
+NoclipButton.Size = UDim2.new(0,150,0,34)
+NoclipButton.Position = UDim2.new(0,180,0,62)
+NoclipButton.Text = "Noclip: OFF"
+NoclipButton.Font = Enum.Font.Gotham
+NoclipButton.TextSize = 14
+NoclipButton.BackgroundColor3 = Color3.fromRGB(30,30,30)
+NoclipButton.TextColor3 = Color3.fromRGB(255,255,255)
+
+-- Chams toggle
+local ChamButton = Instance.new("TextButton", Window)
+ChamButton.Size = UDim2.new(0,150,0,30)
+ChamButton.Position = UDim2.new(0,12,0,106)
+ChamButton.Text = "Chams: ON"
+ChamButton.Font = Enum.Font.Gotham
+ChamButton.TextSize = 13
+ChamButton.BackgroundColor3 = Color3.fromRGB(30,30,30)
+ChamButton.TextColor3 = Color3.fromRGB(255,255,255)
+
+-- Hitbox UI
+local HBLabel = Instance.new("TextLabel", Window)
+HBLabel.Size = UDim2.new(1,-24,0,22)
+HBLabel.Position = UDim2.new(0,12,0,146)
+HBLabel.Text = "Hitbox Expander"
+HBLabel.BackgroundTransparency = 1
+HBLabel.TextColor3 = Color3.fromRGB(210,210,210)
+HBLabel.Font = Enum.Font.GothamBold
+HBLabel.TextSize = 15
+HBLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local SizeLabel = Instance.new("TextLabel", Window)
+SizeLabel.Size = UDim2.new(0,80,0,26)
+SizeLabel.Position = UDim2.new(0,14,0,172)
+SizeLabel.Text = "Size:"
+SizeLabel.BackgroundTransparency = 1
+SizeLabel.TextColor3 = Color3.fromRGB(200,200,200)
+SizeLabel.Font = Enum.Font.Gotham
+SizeLabel.TextSize = 14
+SizeLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local SizeBox = Instance.new("TextBox", Window)
+SizeBox.Size = UDim2.new(0,80,0,26)
+SizeBox.Position = UDim2.new(0,100,0,172)
+SizeBox.Text = "8"
+SizeBox.Font = Enum.Font.Gotham
+SizeBox.TextSize = 16
+SizeBox.BackgroundColor3 = Color3.fromRGB(24,24,24)
+SizeBox.TextColor3 = Color3.fromRGB(255,255,255)
+SizeBox.ClearTextOnFocus = false
+
+local PlayerListFrame = Instance.new("ScrollingFrame", Window)
+PlayerListFrame.Size = UDim2.new(1,-24,0,160)
+PlayerListFrame.Position = UDim2.new(0,12,0,208)
+PlayerListFrame.CanvasSize = UDim2.new(0,0,0,0)
+PlayerListFrame.ScrollBarThickness = 8
+PlayerListFrame.BackgroundColor3 = Color3.fromRGB(18,18,18)
+PlayerListFrame.BorderSizePixel = 0
+
+local SelectedLabel = Instance.new("TextLabel", Window)
+SelectedLabel.Size = UDim2.new(1,-24,0,20)
+SelectedLabel.Position = UDim2.new(0,12,0,372)
+SelectedLabel.Text = "Selected: None"
+SelectedLabel.BackgroundTransparency = 1
+SelectedLabel.TextColor3 = Color3.fromRGB(200,200,200)
+SelectedLabel.Font = Enum.Font.Gotham
+SelectedLabel.TextSize = 14
+SelectedLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local ApplyBtn = Instance.new("TextButton", Window)
+ApplyBtn.Size = UDim2.new(1,-24,0,34)
+ApplyBtn.Position = UDim2.new(0,12,0,394)
+ApplyBtn.Text = "Apply Hitbox to Selected"
+ApplyBtn.Font = Enum.Font.GothamBold
+ApplyBtn.TextSize = 15
+ApplyBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
+ApplyBtn.TextColor3 = Color3.fromRGB(255,255,255)
+
+-- make draggable
+makeDraggable(Icon)
+makeDraggable(Window)
+
+-- toggle behavior
+local function setWindowVisible(v) Window.Visible = v end
+IconBtn.MouseButton1Click:Connect(function() setWindowVisible(not Window.Visible) end)
+CloseBtn.MouseButton1Click:Connect(function() setWindowVisible(false) end)
+
+-- ====== ESP & CHAMS ======
+local function createESPForPlayer(plr)
+    if not plr or not plr.Character then return end
+    local root = getPrimaryRoot(plr.Character)
+    if not root then return end
+    if root:FindFirstChild("UniversalESP") then return end
+
+    local humanoid = plr.Character:FindFirstChildOfClass("Humanoid")
+    local height = (humanoid and humanoid.HipHeight) and humanoid.HipHeight or 2
+    local offsetY = height + 3
+
+    local bb = Instance.new("BillboardGui")
+    bb.Name = "UniversalESP"
+    bb.AlwaysOnTop = true -- ensures it renders above world (wallhack)
+    bb.Size = UDim2.new(0,220,0,64)
+    bb.StudsOffset = Vector3.new(0, offsetY, 0)
+    bb.Parent = root
+
+    local info = Instance.new("TextLabel", bb)
+    info.Name = "Info"
+    info.Size = UDim2.new(1, -8, 0, 22)
+    info.Position = UDim2.new(0,4,0,0)
+    info.BackgroundTransparency = 1
+    info.TextXAlignment = Enum.TextXAlignment.Left
+    info.Font = Enum.Font.GothamBold
+    info.TextSize = 14
+    info.TextColor3 = Color3.new(1,1,1)
+    info.Text = plr.Name
+
+    local barBG = Instance.new("Frame", bb)
+    barBG.Name = "HealthBG"
+    barBG.Size = UDim2.new(1, -8, 0, 12)
+    barBG.Position = UDim2.new(0,4,0,34)
+    barBG.BackgroundColor3 = Color3.fromRGB(44,44,44)
+    barBG.BorderSizePixel = 0
+
+    local barFill = Instance.new("Frame", barBG)
+    barFill.Name = "HealthFill"
+    barFill.Size = UDim2.new(1,0,1,0)
+    barFill.BorderSizePixel = 0
+    barFill.BackgroundColor3 = Color3.fromRGB(0,255,0)
+
+    espMap[plr] = {
+        root = root,
+        billboard = bb,
+        info = info,
+        barFill = barFill,
+        humanoid = humanoid
+    }
+end
+
+local function removeESPForPlayer(plr)
+    local data = espMap[plr]
+    if data and data.billboard and data.billboard.Parent then
+        pcall(function() data.billboard:Destroy() end)
+    end
+    espMap[plr] = nil
+end
+
+local function updateAllESP()
+    for _,plr in pairs(Players:GetPlayers()) do
+        if plr == LocalPlayer then
+            -- skip local player
+        else
+            local char = plr.Character
+            if char and getPrimaryRoot(char) then
+                if not espMap[plr] then createESPForPlayer(plr) end
+            else
+                removeESPForPlayer(plr)
+            end
+        end
+    end
+
+    for plr,data in pairs(espMap) do
+        if not data or not data.humanoid or not data.info then goto cont end
+        if not ESPEnabled then
+            if data.billboard then data.billboard.Enabled = false end
+            goto cont
+        else
+            if data.billboard then data.billboard.Enabled = true end
+        end
+
+        local humanoid = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            local myRoot = LocalPlayer.Character and getPrimaryRoot(LocalPlayer.Character)
+            local targetRoot = getPrimaryRoot(plr.Character)
+            local txt = plr.Name
+            txt = txt .. " | HP: " .. math.floor(humanoid.Health + 0.5)
+            if myRoot and targetRoot then
+                local dist = math.floor((myRoot.Position - targetRoot.Position).Magnitude + 0.5)
+                if dist < MAX_DISTANCE then
+                    txt = txt .. " | " .. dist .. " studs"
+                else
+                    txt = txt .. " | " .. dist .. " studs"
+                end
+            end
+            data.info.Text = txt
+
+            -- health bar update (green->red)
+            local hpRatio = 0
+            if humanoid.MaxHealth and humanoid.MaxHealth > 0 then
+                hpRatio = math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+            end
+            if data.barFill then
+                data.barFill.Size = UDim2.new(hpRatio,0,1,0)
+                local r = math.floor(255 - (hpRatio * 255))
+                local g = math.floor(hpRatio * 255)
+                data.barFill.BackgroundColor3 = Color3.fromRGB(r, g, 0)
+            end
+        end
+        ::cont::
+    end
+end
+
+local function createChamsForPlayer(plr)
+    pcall(function()
+        if HighlightMap[plr] then return end
+        if not plr.Character then return end
+        local highlight = Instance.new("Highlight")
+        highlight.Name = "UH_Highlight"
+        highlight.FillTransparency = 0.6
+        highlight.OutlineTransparency = 0.8
+        highlight.Parent = plr.Character
+        highlight.Adornee = plr.Character
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- ensures visible through walls
+        highlight.FillColor = Color3.fromRGB(200,60,60)
+        highlight.OutlineColor = Color3.fromRGB(255,255,255)
+        HighlightMap[plr] = highlight
+    end)
+end
+
+local function removeChamsForPlayer(plr)
+    local h = HighlightMap[plr]
+    if h and h.Parent then pcall(function() h:Destroy() end) end
+    HighlightMap[plr] = nil
+end
+
+-- ===== Player add/remove handling =====
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        task.wait(0.6)
+        if plr ~= LocalPlayer then
+            createESPForPlayer(plr)
+            if ChamsEnabled then createChamsForPlayer(plr) end
+        end
+    end)
+end)
+
+Players.PlayerRemoving:Connect(function(plr)
+    removeESPForPlayer(plr)
+    removeChamsForPlayer(plr)
+    -- restore original parts if we changed
+    if OriginalParts[plr] then
+        for part,props in pairs(OriginalParts[plr]) do
+            pcall(function()
+                if part and part.Parent then
+                    part.Size = props.Size
+                    part.Transparency = props.Transparency
+                    part.CanCollide = props.CanCollide
+                    part.Material = props.Material
+                    part.BrickColor = props.BrickColor
+                end
+            end)
+        end
+        OriginalParts[plr] = nil
+    end
+end)
+
+-- ===== Player List UI =====
+local function clearPlayerList()
+    for _,child in pairs(PlayerListFrame:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+end
+
+local function rebuildPlayerList()
+    clearPlayerList()
+    local y = 6
+    for _,plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(1,-12,0,PLAYER_BTN_HEIGHT)
+            btn.Position = UDim2.new(0,6,0,y)
+            btn.BackgroundColor3 = Color3.fromRGB(28,28,28)
+            btn.BorderSizePixel = 0
+            btn.Font = Enum.Font.Gotham
+            btn.TextSize = 14
+            btn.TextColor3 = Color3.fromRGB(230,230,230)
+            btn.Text = plr.Name
+            btn.Parent = PlayerListFrame
+
+            btn.MouseButton1Click:Connect(function()
+                SelectedPlayer = plr
+                SelectedLabel.Text = "Selected: " .. plr.Name
+                for _,child in pairs(PlayerListFrame:GetChildren()) do
+                    if child:IsA("TextButton") then child.BackgroundColor3 = Color3.fromRGB(28,28,28) end
+                end
+                btn.BackgroundColor3 = Color3.fromRGB(70,70,110)
+            end)
+            y = y + (PLAYER_BTN_HEIGHT + 6)
+        end
+    end
+    PlayerListFrame.CanvasSize = UDim2.new(0,0,0,y)
+end
+
+task.spawn(function()
+    while true do
+        rebuildPlayerList()
+        task.wait(UPDATE_PLAYERLIST_INTERVAL)
+    end
+end)
+
+-- ===== Hitbox Expander =====
+local function applyHitboxToPlayer(plr, sizeNum)
+    if not plr or not plr.Character then return false end
+    local ok = pcall(function()
+        if not OriginalParts[plr] then OriginalParts[plr] = {} end
+        for _,part in pairs(plr.Character:GetChildren()) do
+            if part:IsA("BasePart") then
+                if not OriginalParts[plr][part] then
+                    OriginalParts[plr][part] = {
+                        Size = part.Size,
+                        Transparency = part.Transparency,
+                        CanCollide = part.CanCollide,
+                        Material = part.Material,
+                        BrickColor = part.BrickColor
+                    }
+                end
+                if part.Name == "HumanoidRootPart" or part.Name == "Head" then
+                    part.Size = Vector3.new(sizeNum, sizeNum, sizeNum)
+                    part.Transparency = 0.45
+                    part.CanCollide = false
+                    part.Material = Enum.Material.Neon
+                    part.BrickColor = BrickColor.new("Bright red")
+                end
+            end
+        end
+    end)
+    return ok
+end
+
+local function restoreHitboxForPlayer(plr)
+    if not plr or not OriginalParts[plr] then return end
+    for part,props in pairs(OriginalParts[plr]) do
+        pcall(function()
+            if part and part.Parent then
+                part.Size = props.Size
+                part.Transparency = props.Transparency
+                part.CanCollide = props.CanCollide
+                part.Material = props.Material
+                part.BrickColor = props.BrickColor
+            end
+        end)
+    end
+    OriginalParts[plr] = nil
+end
+
+ApplyBtn.MouseButton1Click:Connect(function()
+    if not SelectedPlayer then
+        ApplyBtn.Text = "Select player first"
+        task.delay(1.2, function() ApplyBtn.Text = "Apply Hitbox to Selected" end)
+        return
+    end
+    if not SelectedPlayer.Character then
+        ApplyBtn.Text = "Player not spawned"
+        task.delay(1.2, function() ApplyBtn.Text = "Apply Hitbox to Selected" end)
+        return
+    end
+    local sizeNum = tonumber(SizeBox.Text) or 8
+    if sizeNum < 1 then sizeNum = 1 end
+    if sizeNum > 120 then sizeNum = 120 end
+    local ok = applyHitboxToPlayer(SelectedPlayer, sizeNum)
+    if ok then
+        ApplyBtn.Text = "Applied ✔"
+        task.delay(1.2, function() ApplyBtn.Text = "Apply Hitbox to Selected" end)
+    else
+        ApplyBtn.Text = "Failed"
+        task.delay(1.2, function() ApplyBtn.Text = "Apply Hitbox to Selected" end)
+    end
+end)
+
+-- right-click restore (if platform supports)
+ApplyBtn.MouseButton2Click:Connect(function()
+    if SelectedPlayer then
+        restoreHitboxForPlayer(SelectedPlayer)
+        ApplyBtn.Text = "Restored ✔"
+        task.delay(1, function() ApplyBtn.Text = "Apply Hitbox to Selected" end)
+    end
+end)
+
+-- ===== Noclip =====
+RunService.Stepped:Connect(function()
+    if NoclipEnabled and LocalPlayer and LocalPlayer.Character then
+        for _,p in pairs(LocalPlayer.Character:GetChildren()) do
+            if p:IsA("BasePart") then
+                p.CanCollide = false
+            end
+        end
+    end
+end)
+
+-- ===== Button Handlers =====
+ESPButton.MouseButton1Click:Connect(function()
+    ESPEnabled = not ESPEnabled
+    ESPButton.Text = ESPEnabled and "ESP: ON" or "ESP: OFF"
+end)
+
+NoclipButton.MouseButton1Click:Connect(function()
+    NoclipEnabled = not NoclipEnabled
+    NoclipButton.Text = NoclipEnabled and "Noclip: ON" or "Noclip: OFF"
+end)
+
+ChamButton.MouseButton1Click:Connect(function()
+    ChamsEnabled = not ChamsEnabled
+    ChamButton.Text = ChamsEnabled and "Chams: ON" or "Chams: OFF"
+    if ChamsEnabled then
+        for plr,_ in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then createChamsForPlayer(plr) end
+        end
+    else
+        for plr,_ in pairs(Players:GetPlayers()) do removeChamsForPlayer(plr) end
+    end
+end)
+
+-- initial chams apply
+task.spawn(function()
+    task.wait(0.6)
+    if ChamsEnabled then
+        for _,plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then createChamsForPlayer(plr) end
+        end
+    end
+end)
+
+-- ===== Main update loop =====
+RunService.RenderStepped:Connect(function()
+    updateAllESP()
+end)
+
+-- create initial ESPs and hooks
+for _,plr in pairs(Players:GetPlayers()) do
+    if plr ~= LocalPlayer then
+        if plr.Character then createESPForPlayer(plr) end
+        plr.CharacterAdded:Connect(function() task.wait(0.6); createESPForPlayer(plr); if ChamsEnabled then createChamsForPlayer(plr) end end)
+    end
+end
+
+-- safety: hide wi
